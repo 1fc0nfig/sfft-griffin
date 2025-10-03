@@ -1,7 +1,6 @@
 use clap::Parser;
 use hound::{SampleFormat, WavSpec, WavWriter};
-use image::imageops::FilterType;
-use image::GenericImageView;
+use image::{GenericImageView, ImageBuffer, Luma};
 use rand::Rng;
 use rustfft::{num_complex::Complex64, FftPlanner};
 use std::f64::consts::PI;
@@ -152,8 +151,10 @@ fn apply_sharpness_preset(args: &mut Args, sharpness: u8) {
     args.time_med = smooth_med;
     args.hop_length = Some((args.fft_size as f64 / hop_divisor).round() as usize);
 
-    println!("Sharpness preset: {} (smooth=[{},{},{}], hop=fft/{:.1})",
-             sharpness, smooth_freq, smooth_time, smooth_med, hop_divisor);
+    println!(
+        "Sharpness preset: {} (smooth=[{},{},{}], hop=fft/{:.1})",
+        sharpness, smooth_freq, smooth_time, smooth_med, hop_divisor
+    );
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -189,21 +190,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bandpass_high = args.bandpass_high.unwrap_or(0.95 * nyquist);
 
     println!("=== Auto-Tuned Griffin-Lim Image→Audio ===");
-    println!("DSP: sr={} Hz, FFT={}, hop={}, dur={:.1}s, iters={}",
-             args.sample_rate, args.fft_size, hop_length, args.duration, args.iterations);
-    println!("Mapping: {:?}{}", mapping_type,
-             if args.auto_db_range && matches!(mapping_type, MappingType::Db) {
-                 " (auto range from histogram)"
-             } else {
-                 ""
-             });
-    println!("Conditioning: pct=[{:.0}-{:.0}%], smooth=[freq={}, time={}], median={}, per-frame-norm={}",
-             args.pct_clip_low, args.pct_clip_high, args.freq_smooth, args.time_smooth,
-             args.time_med, args.per_frame_norm);
-    println!("Bandpass: {:.0}-{:.0} Hz, Gate: p{:.0}%/×{:.2}",
-             args.bandpass_low, bandpass_high, args.gate_percentile, args.gate_reduction);
-    println!("Output: {}",
-             if args.float32_out { "float32" } else { "int16" });
+    println!(
+        "DSP: sr={} Hz, FFT={}, hop={}, dur={:.1}s, iters={}",
+        args.sample_rate, args.fft_size, hop_length, args.duration, args.iterations
+    );
+    println!(
+        "Mapping: {:?}{}",
+        mapping_type,
+        if args.auto_db_range && matches!(mapping_type, MappingType::Db) {
+            " (auto range from histogram)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "Conditioning: pct=[{:.0}-{:.0}%], smooth=[freq={}, time={}], median={}, per-frame-norm={}",
+        args.pct_clip_low,
+        args.pct_clip_high,
+        args.freq_smooth,
+        args.time_smooth,
+        args.time_med,
+        args.per_frame_norm
+    );
+    println!(
+        "Bandpass: {:.0}-{:.0} Hz, Gate: p{:.0}%/×{:.2}",
+        args.bandpass_low, bandpass_high, args.gate_percentile, args.gate_reduction
+    );
+    println!(
+        "Output: {}",
+        if args.float32_out { "float32" } else { "int16" }
+    );
 
     // Calculate frames
     let target_samples = (args.duration * args.sample_rate as f64).round() as usize;
@@ -219,26 +235,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let img = image::open(&args.image)?;
     let (w, h) = img.dimensions();
 
-    // Convert to grayscale, treating alpha as black
-    let rgba = img.to_rgba8();
-    let mut gray = image::GrayImage::new(w, h);
+    // Convert to grayscale (ignore alpha in luminance but respect transparency when present)
+    let rgba = img.to_rgba32f();
+    let mut gray: ImageBuffer<Luma<f32>, Vec<f32>> = ImageBuffer::new(w, h);
     for y in 0..h {
         for x in 0..w {
             let pixel = rgba.get_pixel(x, y);
-            let r = pixel[0] as f32;
-            let g = pixel[1] as f32;
-            let b = pixel[2] as f32;
-            let a = pixel[3] as f32 / 255.0;
-
-            // Grayscale = 0.299*R + 0.587*G + 0.114*B, then multiply by alpha
-            let mut luminance = (0.299 * r + 0.587 * g + 0.114 * b) * a;
-
-            // Invert if requested
+            let (r, g, b, a) = (pixel[0], pixel[1], pixel[2], pixel[3]);
+            let mut luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+            luminance *= a.max(0.0).min(1.0);
             if args.invert {
-                luminance = 255.0 - luminance;
+                luminance = 1.0 - luminance;
             }
-
-            gray.put_pixel(x, y, image::Luma([luminance as u8]));
+            gray.put_pixel(x, y, Luma([luminance.clamp(0.0, 1.0)]));
         }
     }
 
@@ -246,94 +255,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  Image inverted (black ↔ white)");
     }
 
-    // Apply density (contrast adjustment)
-    if args.density != 1.0 {
-        for y in 0..h {
-            for x in 0..w {
-                let pixel = gray.get_pixel(x, y).0[0];
-                let normalized = pixel as f64 / 255.0;
-                let adjusted = normalized.powf(args.density);
-                gray.put_pixel(x, y, image::Luma([(adjusted * 255.0) as u8]));
-            }
+    if (args.density - 1.0).abs() > f64::EPSILON {
+        for pix in gray.pixels_mut() {
+            let v = pix.0[0].clamp(0.0, 1.0);
+            pix.0[0] = v.powf(args.density as f32);
         }
-        println!("  Density applied: {:.2} ({})", args.density,
-                 if args.density > 1.0 { "sharpened" } else if args.density < 1.0 { "softened" } else { "neutral" });
+        println!("  Density applied: {:.2}", args.density);
     }
 
     let num_freq_bins = args.fft_size / 2 + 1;
-    let resized = image::imageops::resize(&gray, num_frames as u32, num_freq_bins as u32, FilterType::Lanczos3);
-    println!("  {}×{} → {}×{} (frames × bins)", w, h, resized.width(), resized.height());
+    let freq_per_bin = args.sample_rate as f64 / args.fft_size as f64;
+    let min_freq = freq_per_bin.max(1.0);
+    let max_freq = (args.sample_rate as f64 / 2.0).max(min_freq * (1.0 + 1e-6));
+    let log_min = min_freq.ln();
+    let log_max = max_freq.ln();
+    let log_span = (log_max - log_min).max(f64::EPSILON);
+    let width = if w > 1 { (w - 1) as f64 } else { 0.0 };
+    let height = if h > 1 { (h - 1) as f64 } else { 0.0 };
 
-    // Auto dB range from histogram
-    if args.auto_db_range && matches!(mapping_type, MappingType::Db) {
-        let mut pixels: Vec<u8> = Vec::with_capacity((resized.width() * resized.height()) as usize);
-        for y in 0..resized.height() {
-            for x in 0..resized.width() {
-                pixels.push(resized.get_pixel(x, y).0[0]);
+    let mut raw_vals = vec![vec![0.0f64; num_frames]; num_freq_bins];
+    let mut raw_flat = Vec::with_capacity(num_frames * num_freq_bins);
+
+    for y in 0..num_freq_bins {
+        let freq = y as f64 * freq_per_bin;
+        let freq_ratio = if args.log_freq {
+            if freq <= min_freq {
+                0.0
+            } else if freq >= max_freq {
+                1.0
+            } else {
+                ((freq.ln() - log_min) / log_span).clamp(0.0, 1.0)
             }
-        }
-        pixels.sort_unstable();
-        let n = pixels.len().max(1);
-        let p = |q: f64| -> u8 {
-            pixels[(((q / 100.0).clamp(0.0, 1.0)) * (n as f64 - 1.0)).round() as usize]
+        } else if num_freq_bins > 1 {
+            y as f64 / (num_freq_bins as f64 - 1.0)
+        } else {
+            0.0
         };
-        let p10 = p(10.0) as f64 / 255.0;
-        let p99 = p(99.0) as f64 / 255.0;
+        let src_y = (1.0 - freq_ratio) * height;
 
-        // Map p10 → -12 dB (0.25 mag), p99 → +6 dB (2.0 mag)
-        args.db_min = -12.0;
-        args.db_max = 6.0;
-        if p99 <= p10 {
-            // Fallback if image is flat
-            args.db_min = -12.0;
-            args.db_max = 6.0;
+        for x in 0..num_frames {
+            let time_ratio = if num_frames > 1 {
+                x as f64 / (num_frames as f64 - 1.0)
+            } else {
+                0.0
+            };
+            let src_x = time_ratio * width;
+            let px = sample_bilinear(&gray, src_x, src_y);
+            raw_vals[y][x] = px;
+            raw_flat.push(px);
         }
-        println!("  Auto dB mapping: p10→{:.1} dB, p99→{:.1} dB", args.db_min, args.db_max);
     }
 
-    // Extract magnitude with vertical flip
-    let mut magnitude = vec![vec![0.0f64; num_frames]; num_freq_bins];
-
-    if args.log_freq {
-        // Logarithmic frequency mapping
-        println!("  Using logarithmic frequency scale");
-        let nyquist = args.sample_rate as f64 / 2.0;
-        let f_min = 20.0; // 20 Hz minimum
-        let f_max = nyquist;
-        let log_ratio = (f_max / f_min).ln();
-
-        for y in 0..num_freq_bins {
-            for x in 0..num_frames {
-                // Calculate logarithmic frequency for this bin
-                let bin_freq = y as f64 * (args.sample_rate as f64 / args.fft_size as f64);
-
-                // Map to image row (logarithmic)
-                let img_y_float = if bin_freq <= f_min {
-                    0.0
-                } else if bin_freq >= f_max {
-                    (num_freq_bins - 1) as f64
-                } else {
-                    ((bin_freq / f_min).ln() / log_ratio) * (num_freq_bins - 1) as f64
-                };
-
-                // Flip vertically and clamp
-                let img_y_flipped = (num_freq_bins - 1) as f64 - img_y_float;
-                let img_y = img_y_flipped.clamp(0.0, (num_freq_bins - 1) as f64).round() as u32;
-
-                let pixel = resized.get_pixel(x as u32, img_y).0[0];
-                let mag = pixel_to_magnitude(pixel, mapping_type, args.gamma, args.scale, args.db_min, args.db_max);
-                magnitude[y][x] = mag.max(args.mag_floor);
-            }
+    let mut auto_db_norm: Option<(f64, f64)> = None;
+    if args.auto_db_range && matches!(mapping_type, MappingType::Db) && !raw_flat.is_empty() {
+        raw_flat.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let len = raw_flat.len();
+        let percentile = |q: f64| -> f64 {
+            let idx = ((q / 100.0).clamp(0.0, 1.0) * (len as f64 - 1.0)).round() as usize;
+            raw_flat[idx]
+        };
+        let low = percentile(1.0);
+        let high = percentile(99.0);
+        if high > low + f64::EPSILON {
+            auto_db_norm = Some((low, high));
+            println!(
+                "  Auto dB mapping: norm[{:.3}, {:.3}] → [{:.1}, {:.1}] dB",
+                low, high, args.db_min, args.db_max
+            );
+        } else {
+            println!("  Auto dB mapping skipped (degenerate histogram)");
         }
-    } else {
-        // Linear frequency mapping (default)
-        for y in 0..num_freq_bins {
-            for x in 0..num_frames {
-                let img_y = (num_freq_bins - 1 - y) as u32;
-                let pixel = resized.get_pixel(x as u32, img_y).0[0];
-                let mag = pixel_to_magnitude(pixel, mapping_type, args.gamma, args.scale, args.db_min, args.db_max);
-                magnitude[y][x] = mag.max(args.mag_floor);
-            }
+    }
+
+    let mut magnitude = vec![vec![0.0f64; num_frames]; num_freq_bins];
+    for y in 0..num_freq_bins {
+        for x in 0..num_frames {
+            let mag = pixel_to_magnitude(
+                raw_vals[y][x],
+                mapping_type,
+                args.gamma,
+                args.scale,
+                args.db_min,
+                args.db_max,
+                auto_db_norm,
+            );
+            magnitude[y][x] = mag.max(args.mag_floor);
         }
     }
 
@@ -346,7 +352,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Conditioning ===");
 
     // Percentile clamp
-    let (low_val, high_val) = percentile_clamp(&mut magnitude, args.pct_clip_low, args.pct_clip_high);
+    let (low_val, high_val) =
+        percentile_clamp(&mut magnitude, args.pct_clip_low, args.pct_clip_high);
     println!("Percentile: [{:.6}, {:.6}]", low_val, high_val);
 
     // Smoothing
@@ -359,12 +366,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.time_med > 1 {
         median_along_time(&mut magnitude, args.time_med);
     }
-    println!("Smoothed: freq={}, time={}, median={}", args.freq_smooth, args.time_smooth, args.time_med);
+    println!(
+        "Smoothed: freq={}, time={}, median={}",
+        args.freq_smooth, args.time_smooth, args.time_med
+    );
 
     // Bandpass
-    let zeroed = apply_bandpass(&mut magnitude, args.bandpass_low, bandpass_high,
-                                 args.sample_rate, args.fft_size);
-    println!("Bandpass: {:.0}-{:.0} Hz ({} bins zeroed)", args.bandpass_low, bandpass_high, zeroed);
+    let zeroed = apply_bandpass(
+        &mut magnitude,
+        args.bandpass_low,
+        bandpass_high,
+        args.sample_rate,
+        args.fft_size,
+    );
+    println!(
+        "Bandpass: {:.0}-{:.0} Hz ({} bins zeroed)",
+        args.bandpass_low, bandpass_high, zeroed
+    );
 
     // Spectral gate
     let gated_pct = spectral_gate(&mut magnitude, args.gate_percentile, args.gate_reduction);
@@ -408,12 +426,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let min_mag = mags.iter().copied().fold(f64::INFINITY, f64::min);
     let max_mag = mags.iter().copied().fold(0.0f64, f64::max);
     let mean_mag = mags.iter().sum::<f64>() / mags.len() as f64;
-    println!("Range: [{:.6}, {:.6}], Mean: {:.6}", min_mag, max_mag, mean_mag);
+    println!(
+        "Range: [{:.6}, {:.6}], Mean: {:.6}",
+        min_mag, max_mag, mean_mag
+    );
 
     // Fast Griffin-Lim
     println!("\n=== Griffin-Lim ({} iterations) ===", args.iterations);
-    let audio = fast_griffin_lim(&magnitude, args.fft_size, hop_length, args.iterations,
-                                   args.gl_momentum, args.preemph)?;
+    let audio = fast_griffin_lim(
+        &magnitude,
+        args.fft_size,
+        hop_length,
+        args.iterations,
+        args.gl_momentum,
+        args.preemph,
+    )?;
 
     println!("\n=== Post-Processing ===");
     let mut audio_proc = audio.clone();
@@ -434,16 +461,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Fade in/out
     if args.fade_in_pct > 0.0 || args.fade_out_pct > 0.0 {
         apply_fades(&mut audio_proc, args.fade_in_pct, args.fade_out_pct);
-        println!("Fades: in={:.1}%, out={:.1}%", args.fade_in_pct * 100.0, args.fade_out_pct * 100.0);
+        println!(
+            "Fades: in={:.1}%, out={:.1}%",
+            args.fade_in_pct * 100.0,
+            args.fade_out_pct * 100.0
+        );
     }
 
     let rms_raw = compute_rms(&audio_proc);
     let peak_raw = audio_proc.iter().map(|&x| x.abs()).fold(0.0f64, f64::max);
-    let rms_db = if rms_raw > 1e-10 { 20.0 * rms_raw.log10() } else { -100.0 };
-    println!("Raw: RMS={:.6} ({:.1} dBFS), Peak={:.6}", rms_raw, rms_db, peak_raw);
+    let rms_db = if rms_raw > 1e-10 {
+        20.0 * rms_raw.log10()
+    } else {
+        -100.0
+    };
+    println!(
+        "Raw: RMS={:.6} ({:.1} dBFS), Peak={:.6}",
+        rms_raw, rms_db, peak_raw
+    );
 
     // Clip extreme peaks before normalization
-    let crest_raw = if rms_raw > 1e-10 { peak_raw / rms_raw } else { 1.0 };
+    let crest_raw = if rms_raw > 1e-10 {
+        peak_raw / rms_raw
+    } else {
+        1.0
+    };
     if crest_raw > 10.0 {
         println!("Crest factor: {:.1}× - clipping outlier peaks", crest_raw);
         // Hard clip peaks above 2× RMS (removes impulses without boosting floor)
@@ -457,9 +499,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let rms_after_clip = compute_rms(&audio_proc);
         let peak_after_clip = audio_proc.iter().map(|&x| x.abs()).fold(0.0f64, f64::max);
-        let crest_after_clip = if rms_after_clip > 1e-10 { peak_after_clip / rms_after_clip } else { 1.0 };
-        println!("  Clipped {} samples → RMS={:.6}, Peak={:.6}, Crest={:.1}×",
-                 clipped_count, rms_after_clip, peak_after_clip, crest_after_clip);
+        let crest_after_clip = if rms_after_clip > 1e-10 {
+            peak_after_clip / rms_after_clip
+        } else {
+            1.0
+        };
+        println!(
+            "  Clipped {} samples → RMS={:.6}, Peak={:.6}, Crest={:.1}×",
+            clipped_count, rms_after_clip, peak_after_clip, crest_after_clip
+        );
     }
 
     // Normalize
@@ -470,24 +518,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut target_rms = args.target_rms;
         if args.target_rms_auto {
             // Predict peak if we hit target RMS; scale target to keep 0.95 * ceiling margin
-            let pred_peak = if rms_raw > 1e-12 { peak_raw * (target_rms / rms_raw) } else { 0.0 };
+            let pred_peak = if rms_raw > 1e-12 {
+                peak_raw * (target_rms / rms_raw)
+            } else {
+                0.0
+            };
             let safe_peak = args.limiter_ceiling * 0.95;
             if pred_peak > safe_peak && pred_peak > 0.0 {
                 let scale = safe_peak / pred_peak;
                 let new_target = (target_rms * scale).clamp(0.05, 0.5); // keep reasonable range
-                println!("Auto RMS: {:.3} → {:.3} to respect peak ceiling", target_rms, new_target);
+                println!(
+                    "Auto RMS: {:.3} → {:.3} to respect peak ceiling",
+                    target_rms, new_target
+                );
                 target_rms = new_target;
             }
         }
 
         let mut audio_norm = audio_proc.clone();
-        normalize_audio(&mut audio_norm, target_rms, args.limiter_ceiling,
-                        args.softclip_knee, args.softclip_slope);
+        normalize_audio(
+            &mut audio_norm,
+            target_rms,
+            args.limiter_ceiling,
+            args.softclip_knee,
+            args.softclip_slope,
+        );
 
         let rms_norm = compute_rms(&audio_norm);
         let peak_norm = audio_norm.iter().map(|&x| x.abs()).fold(0.0f64, f64::max);
-        let rms_norm_db = if rms_norm > 1e-10 { 20.0 * rms_norm.log10() } else { -100.0 };
-        println!("Normalized: RMS={:.6} ({:.1} dBFS), Peak={:.6}", rms_norm, rms_norm_db, peak_norm);
+        let rms_norm_db = if rms_norm > 1e-10 {
+            20.0 * rms_norm.log10()
+        } else {
+            -100.0
+        };
+        println!(
+            "Normalized: RMS={:.6} ({:.1} dBFS), Peak={:.6}",
+            rms_norm, rms_norm_db, peak_norm
+        );
 
         audio_norm
     };
@@ -500,9 +567,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let gain_rms = compute_rms(&audio_final);
         let gain_peak = audio_final.iter().map(|&x| x.abs()).fold(0.0f64, f64::max);
-        let gain_rms_db = if gain_rms > 1e-10 { 20.0 * gain_rms.log10() } else { -100.0 };
-        println!("Output gain: ×{:.2} → RMS={:.6} ({:.1} dBFS), Peak={:.6}",
-                 args.output_gain, gain_rms, gain_rms_db, gain_peak);
+        let gain_rms_db = if gain_rms > 1e-10 {
+            20.0 * gain_rms.log10()
+        } else {
+            -100.0
+        };
+        println!(
+            "Output gain: ×{:.2} → RMS={:.6} ({:.1} dBFS), Peak={:.6}",
+            args.output_gain, gain_rms, gain_rms_db, gain_peak
+        );
     }
 
     // Verify peak (allow >1.0 for float32 output)
@@ -512,34 +585,100 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\nWriting: {:?}", args.output);
-    write_wav(&args.output, &audio_final, args.sample_rate, args.float32_out)?;
+    write_wav(
+        &args.output,
+        &audio_final,
+        args.sample_rate,
+        args.float32_out,
+    )?;
 
     let written_rms = compute_rms(&audio_final);
     let written_std = compute_std(&audio_final);
-    let written_rms_db = if written_rms > 1e-10 { 20.0 * written_rms.log10() } else { -100.0 };
-    println!("Written: RMS={:.6} ({:.1} dBFS), Peak={:.6}, Std={:.6}, Duration={:.2}s",
-             written_rms, written_rms_db, final_peak, written_std,
-             audio_final.len() as f64 / args.sample_rate as f64);
+    let written_rms_db = if written_rms > 1e-10 {
+        20.0 * written_rms.log10()
+    } else {
+        -100.0
+    };
+    println!(
+        "Written: RMS={:.6} ({:.1} dBFS), Peak={:.6}, Std={:.6}, Duration={:.2}s",
+        written_rms,
+        written_rms_db,
+        final_peak,
+        written_std,
+        audio_final.len() as f64 / args.sample_rate as f64
+    );
 
     if !args.no_normalize && written_std < 0.01 {
-        println!("⚠ WARNING: Low variance (std={:.6}), audio may be crushed", written_std);
+        println!(
+            "⚠ WARNING: Low variance (std={:.6}), audio may be crushed",
+            written_std
+        );
     }
 
     println!("Done!");
     Ok(())
 }
 
-fn pixel_to_magnitude(pixel: u8, mapping: MappingType, gamma: f64, scale: f64,
-                       db_min: f64, db_max: f64) -> f64 {
-    let norm = pixel as f64 / 255.0;
+fn pixel_to_magnitude(
+    norm_value: f64,
+    mapping: MappingType,
+    gamma: f64,
+    scale: f64,
+    db_min: f64,
+    db_max: f64,
+    auto_norm: Option<(f64, f64)>,
+) -> f64 {
+    let mut norm = norm_value.clamp(0.0, 1.0);
+    if let Some((low, high)) = auto_norm {
+        if high > low + f64::EPSILON {
+            norm = ((norm - low) / (high - low)).clamp(0.0, 1.0);
+        } else {
+            norm = 0.0;
+        }
+    }
+
     match mapping {
         MappingType::Linear => norm * scale,
         MappingType::Power => norm.powf(gamma) * scale,
         MappingType::Db => {
-            let db = norm * (db_max - db_min) + db_min;
-            10f64.powf(db / 20.0)
+            if norm <= 0.0 {
+                0.0
+            } else {
+                let db = norm * (db_max - db_min) + db_min;
+                10f64.powf(db / 20.0)
+            }
         }
     }
+}
+
+fn sample_bilinear(img: &ImageBuffer<Luma<f32>, Vec<f32>>, x: f64, y: f64) -> f64 {
+    let width = img.width();
+    let height = img.height();
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+
+    let max_x = (width - 1) as f64;
+    let max_y = (height - 1) as f64;
+    let x = x.clamp(0.0, max_x);
+    let y = y.clamp(0.0, max_y);
+
+    let x0 = x.floor();
+    let y0 = y.floor();
+    let x1 = (x0 + 1.0).min(max_x);
+    let y1 = (y0 + 1.0).min(max_y);
+
+    let tx = (x - x0) as f32;
+    let ty = (y - y0) as f32;
+
+    let p00 = img.get_pixel(x0 as u32, y0 as u32).0[0];
+    let p10 = img.get_pixel(x1 as u32, y0 as u32).0[0];
+    let p01 = img.get_pixel(x0 as u32, y1 as u32).0[0];
+    let p11 = img.get_pixel(x1 as u32, y1 as u32).0[0];
+
+    let a = p00 * (1.0 - tx) + p10 * tx;
+    let b = p01 * (1.0 - tx) + p11 * tx;
+    (a * (1.0 - ty) + b * ty) as f64
 }
 
 fn per_frame_normalize(mag: &mut [Vec<f64>], floor: f64) {
@@ -696,9 +835,14 @@ fn spectral_gate(mag: &mut [Vec<f64>], percentile: f64, reduction: f64) -> f64 {
     100.0 * reduced_count as f64 / total as f64
 }
 
-fn fast_griffin_lim(magnitude: &[Vec<f64>], fft_size: usize, hop_length: usize,
-                     iterations: usize, momentum: f64, preemph: f64)
-    -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+fn fast_griffin_lim(
+    magnitude: &[Vec<f64>],
+    fft_size: usize,
+    hop_length: usize,
+    iterations: usize,
+    momentum: f64,
+    preemph: f64,
+) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
     let num_bins = magnitude.len();
     let num_frames = magnitude[0].len();
 
@@ -750,8 +894,13 @@ fn fast_griffin_lim(magnitude: &[Vec<f64>], fft_size: usize, hop_length: usize,
     Ok(audio)
 }
 
-fn stft_forward_fn(audio: &[f64], fft_size: usize, hop_length: usize,
-                    fft: &std::sync::Arc<dyn rustfft::Fft<f64>>, output: &mut [Vec<Complex64>]) {
+fn stft_forward_fn(
+    audio: &[f64],
+    fft_size: usize,
+    hop_length: usize,
+    fft: &std::sync::Arc<dyn rustfft::Fft<f64>>,
+    output: &mut [Vec<Complex64>],
+) {
     let num_bins = fft_size / 2 + 1;
     let num_frames = if audio.len() >= fft_size {
         (audio.len() - fft_size) / hop_length + 1
@@ -776,8 +925,13 @@ fn stft_forward_fn(audio: &[f64], fft_size: usize, hop_length: usize,
     }
 }
 
-fn istft(stft: &[Vec<Complex64>], fft_size: usize, hop_length: usize,
-          ifft: &std::sync::Arc<dyn rustfft::Fft<f64>>, print_cola: bool) -> Vec<f64> {
+fn istft(
+    stft: &[Vec<Complex64>],
+    fft_size: usize,
+    hop_length: usize,
+    ifft: &std::sync::Arc<dyn rustfft::Fft<f64>>,
+    print_cola: bool,
+) -> Vec<f64> {
     let num_frames = stft[0].len();
     let audio_len = (num_frames - 1) * hop_length + fft_size;
     let mut audio = vec![0.0f64; audio_len];
@@ -828,7 +982,9 @@ fn istft(stft: &[Vec<Complex64>], fft_size: usize, hop_length: usize,
 }
 
 fn hann_window(size: usize) -> Vec<f64> {
-    (0..size).map(|i| 0.5 * (1.0 - ((2.0 * PI * i as f64) / (size as f64 - 1.0)).cos())).collect()
+    (0..size)
+        .map(|i| 0.5 * (1.0 - ((2.0 * PI * i as f64) / (size as f64 - 1.0)).cos()))
+        .collect()
 }
 
 fn pre_emphasis(audio: &mut [f64], coeff: f64) {
@@ -918,30 +1074,46 @@ fn normalize_audio(
     _softclip_knee: f64,
     _softclip_slope: f64,
 ) {
-    if audio.is_empty() { return; }
+    if audio.is_empty() {
+        return;
+    }
 
     // 1) Compute current stats
     let initial_rms = compute_rms(audio);
 
     if initial_rms < 1e-12 {
         // emergency tiny boost to avoid NaNs
-        for s in audio.iter_mut() { *s *= 1000.0; }
+        for s in audio.iter_mut() {
+            *s *= 1000.0;
+        }
         let boosted_rms = compute_rms(audio);
-        if boosted_rms < 1e-12 { return; }
+        if boosted_rms < 1e-12 {
+            return;
+        }
 
         // Apply target gain
         let gain = target_rms / boosted_rms;
-        for s in audio.iter_mut() { *s *= gain; }
+        for s in audio.iter_mut() {
+            *s *= gain;
+        }
     } else {
         // 2) Apply RMS gain to hit target (may exceed ceiling - that's OK!)
         let gain = target_rms / initial_rms;
-        println!("  RMS gain: {:.3}× ({:.6} → {:.6})", gain, initial_rms, target_rms);
-        for s in audio.iter_mut() { *s *= gain; }
+        println!(
+            "  RMS gain: {:.3}× ({:.6} → {:.6})",
+            gain, initial_rms, target_rms
+        );
+        for s in audio.iter_mut() {
+            *s *= gain;
+        }
 
         // Check what we have after gain
         let after_gain_rms = compute_rms(audio);
         let after_gain_peak = audio.iter().copied().map(f64::abs).fold(0.0, f64::max);
-        println!("  After gain: RMS={:.6}, Peak={:.6}", after_gain_rms, after_gain_peak);
+        println!(
+            "  After gain: RMS={:.6}, Peak={:.6}",
+            after_gain_rms, after_gain_peak
+        );
     }
 
     // 3) Brick-wall limiter at ceiling (simple hard clip)
@@ -956,8 +1128,12 @@ fn normalize_audio(
         }
         if abs_s > limiter_ceiling {
             if !first_clip_logged {
-                println!("  DEBUG: First clip - abs_s={:.6}, ceiling={:.6}, comparison={}",
-                        abs_s, limiter_ceiling, abs_s > limiter_ceiling);
+                println!(
+                    "  DEBUG: First clip - abs_s={:.6}, ceiling={:.6}, comparison={}",
+                    abs_s,
+                    limiter_ceiling,
+                    abs_s > limiter_ceiling
+                );
                 first_clip_logged = true;
             }
             *s = s.signum() * limiter_ceiling;
@@ -978,13 +1154,21 @@ fn normalize_audio(
     println!("  Final: RMS={:.6}, Peak={:.6}", final_rms, final_peak);
 }
 
-fn write_wav(path: &PathBuf, audio: &[f64], sample_rate: u32, float32: bool)
-    -> Result<(), Box<dyn std::error::Error>> {
+fn write_wav(
+    path: &PathBuf,
+    audio: &[f64],
+    sample_rate: u32,
+    float32: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let spec = WavSpec {
         channels: 1,
         sample_rate,
         bits_per_sample: if float32 { 32 } else { 16 },
-        sample_format: if float32 { SampleFormat::Float } else { SampleFormat::Int },
+        sample_format: if float32 {
+            SampleFormat::Float
+        } else {
+            SampleFormat::Int
+        },
     };
     let mut writer = WavWriter::create(path, spec)?;
     if float32 {
