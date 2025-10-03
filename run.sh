@@ -51,6 +51,9 @@ if ! command -v "${PYTHON}" >/dev/null 2>&1; then
     PYTHON="python"
 fi
 
+# play audio using ffplay (plays mono through both speakers)
+ffplay -nodisp -autoexit "${OUTPUT_FILE}" &>/dev/null &
+
 "${PYTHON}" "${SCRIPT_DIR}/scripts/audio_histogram.py" "${OUTPUT_FILE}" --only-spectrogram ${LOG_FREQ}
 
 popd >/dev/null

@@ -10,7 +10,7 @@ from scipy.io import wavfile
 from scipy.signal import spectrogram, get_window
 
 def plot_audio_views(audio_path, bins=100, nfft=1024, hop=256, window='hann', maxfreq=None, 
-                    show_histogram=True, show_waveform=True, show_spectrogram=True, log_freq=False):
+                    show_histogram=True, show_waveform=True, show_spectrogram=True, log_freq=False, save_spectrogram=False):
     # Read WAV
     sr, x = wavfile.read(audio_path)
 
@@ -125,7 +125,17 @@ def plot_audio_views(audio_path, bins=100, nfft=1024, hop=256, window='hann', ma
         cbar = fig.colorbar(im, ax=ax)
         cbar.set_label('dB')
 
-    plt.show()
+    if save_spectrogram and show_spectrogram:
+        # Generate output filename
+        import os
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        output_file = f"{base_name}_spectrogram.png"
+        
+        # Save the figure
+        plt.savefig(output_file, dpi=150, bbox_inches='tight')
+        print(f"Spectrogram saved as: {output_file}")
+    else:
+        plt.show()
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description='Display histogram, waveform, and spectrogram of a WAV file')
@@ -142,6 +152,7 @@ if __name__ == '__main__':
     p.add_argument('--only-waveform', action='store_true', help='Show only waveform')
     p.add_argument('--only-spectrogram', action='store_true', help='Show only spectrogram')
     p.add_argument('--log-freq', action='store_true', help='Use log scale for frequency axis in spectrogram')
+    p.add_argument('--save-spectrogram', action='store_true', help='Save spectrogram as PNG file instead of displaying')
     args = p.parse_args()
 
     # Determine which plots to show
@@ -164,4 +175,4 @@ if __name__ == '__main__':
         show_spectrogram = True
 
     plot_audio_views(args.audio, args.bins, args.nfft, args.hop, args.window, args.maxfreq,
-                    show_histogram, show_waveform, show_spectrogram, args.log_freq)
+                    show_histogram, show_waveform, show_spectrogram, args.log_freq, args.save_spectrogram)

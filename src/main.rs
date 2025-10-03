@@ -37,11 +37,11 @@ struct Args {
     duration: f64,
     #[arg(short, long, default_value_t = 44100)]
     sample_rate: u32,
-    #[arg(short, long, default_value_t = 2048)]
+    #[arg(short, long, default_value_t = 4096)]
     fft_size: usize,
     #[arg(short = 'l', long)]
     hop_length: Option<usize>,
-    #[arg(short = 'n', long, default_value_t = 48)]
+    #[arg(short = 'n', long, default_value_t = 64)]
     iterations: usize,
 
     // Image processing
@@ -61,41 +61,43 @@ struct Args {
     auto_db_range: bool,
     #[arg(short = 'g', long, default_value_t = 1.0)]
     gamma: f64,
-    #[arg(long, default_value_t = 15.0)]
+    #[arg(long, default_value_t = 6.0)]
     scale: f64,
-    #[arg(long, default_value_t = -24.0, allow_hyphen_values = true)]
+    #[arg(long, default_value_t = -120.0, allow_hyphen_values = true)]
     db_min: f64,
-    #[arg(long, default_value_t = -3.0, allow_hyphen_values = true)]
+    #[arg(long, default_value_t = -6.0, allow_hyphen_values = true)]
     db_max: f64,
-    #[arg(long, default_value_t = 1e-6)]
+    #[arg(long, default_value_t = 0.02)]
     mag_floor: f64,
     #[arg(long, default_value_t = false)]
     per_frame_norm: bool,
+    #[arg(long, default_value_t = 0.02)]
+    silence_threshold: f64,
 
     // Spectrogram conditioning (moderate to preserve contrast)
-    #[arg(long, default_value_t = 2.0)]
+    #[arg(long, default_value_t = 0.0)]
     pct_clip_low: f64,
-    #[arg(long, default_value_t = 98.0)]
+    #[arg(long, default_value_t = 100.0)]
     pct_clip_high: f64,
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 1)]
     freq_smooth: usize,
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 1)]
     time_smooth: usize,
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 1)]
     time_med: usize,
-    #[arg(long, default_value_t = 60.0)]
+    #[arg(long, default_value_t = 0.0)]
     bandpass_low: f64,
     #[arg(long)]
     bandpass_high: Option<f64>,
 
     // Spectral gating (very aggressive - nearly silence black regions)
-    #[arg(long, default_value_t = 30.0)]
+    #[arg(long, default_value_t = 70.0)]
     gate_percentile: f64,
-    #[arg(long, default_value_t = 0.01)]
+    #[arg(long, default_value_t = 0.1)]
     gate_reduction: f64,
 
     // Fast Griffin-Lim
-    #[arg(long, default_value_t = 0.99)]
+    #[arg(long, default_value_t = 0.2)]
     gl_momentum: f64,
 
     // Post-processing
@@ -103,21 +105,21 @@ struct Args {
     preemph: f64,
     #[arg(long, default_value_t = 0.0)]
     post_lp: f64,
-    #[arg(long, default_value_t = 0.01)]
+    #[arg(long, default_value_t = 0.0)]
     fade_in_pct: f64,
-    #[arg(long, default_value_t = 0.01)]
+    #[arg(long, default_value_t = 0.0)]
     fade_out_pct: f64,
 
     // Normalization (moderate target to avoid boosting noise)
-    #[arg(long, default_value_t = 0.3)]
+    #[arg(long, default_value_t = 0.22)]
     target_rms: f64,
     #[arg(long, default_value_t = false)]
     target_rms_auto: bool,
-    #[arg(long, default_value_t = 2.0)]
+    #[arg(long, default_value_t = 0.98)]
     limiter_ceiling: f64,
     #[arg(long, default_value_t = 0.0)]
     softclip_knee: f64,
-    #[arg(long, default_value_t = 0.25)]
+    #[arg(long, default_value_t = 0.15)]
     softclip_slope: f64,
     #[arg(long, default_value_t = false)]
     no_normalize: bool,

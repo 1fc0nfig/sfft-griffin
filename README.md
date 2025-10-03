@@ -19,17 +19,21 @@ Pass `--help` for the full list of options. Frequently tuned controls include:
 | Flag | Default | Purpose |
 | ---- | ------- | ------- |
 | `--duration <sec>` | `5.0` | Target audio length |
-| `--fft-size <N>` | `2048` | FFT size (power of two) |
-| `--iterations <N>` | `48` | Griffin–Lim iterations |
-| `--mapping <mode>` | `power` | Magnitude mapping (`power`, `linear`, `db`) |
+| `--fft-size <N>` | `4096` | FFT size (power of two) |
+| `--iterations <N>` | `96` | Griffin–Lim iterations |
+| `--mapping <mode>` | `db` | Magnitude mapping (`db`, `power`, `linear`) |
 | `--gamma <val>` | `1.0` | Gamma for `power` mapping |
-| `--scale <val>` | `15.0` | Magnitude scaling factor |
+| `--scale <val>` | `6.0` | Magnitude scaling factor (power/linear modes) |
 | `--per-frame-norm` | `false` | Normalize individual time frames |
 | `--float32-out` | `true` | Write 32‑bit float output instead of 16‑bit |
+| `--silence-threshold <val>` | `0.0` | Zero out residual bleed below this magnitude |
+| `--gate-reduction <val>` | `1.0` | Set `<1.0` to enable spectral gating |
 
 ## Example Gallery
 
 The repository ships with a compact test scene that mixes bright edges and dark voids—great for demos, glitch audio textures, and spectral beat slicing. Feel free to drop additional assets into `examples/` to build your own sound pack.
+
+**Quality-first defaults.** Version 0.4 raises FFT size, iteration count, and switches to auto-ranged dB mapping (5th percentile → −60 dB, 95th → −2 dB). Spectral gating, magnitude compression, and heavy smoothing are now opt-in so grayscale nuance survives intact.
 
 <div align="center">
   <img src="examples/image.jpg" alt="Source spectrogram artwork" width="45%" style="height: 300px; object-fit: cover;" />

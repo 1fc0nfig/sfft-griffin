@@ -10,3 +10,15 @@ __pycache__/
 .idea/
 venv/
 env/
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.webp
+*.ico
+*.svg
+*.eps
+*.pdf
+*.csv
